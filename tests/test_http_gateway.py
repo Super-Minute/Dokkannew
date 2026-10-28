@@ -16,6 +16,14 @@ from dokkan.adapters.save_store import SaveRecord
 from dokkan.application.errors import RefillUnavailable
 from dokkan.domain.models import Difficulty, Rarity, Stage, Team
 
+
+def header(headers: dict, name: str):
+    """Case-insensitive header lookup (RFC 7230 \u00a73.2); urllib re-titles
+    header names before they hit the wire, so tests must not assume the
+    exact case the gateway code set."""
+    name = name.lower()
+    return next((v for k, v in headers.items() if k.lower() == name), None)
+
 USER_PAYLOAD = {
     "user": {"name": "Testy", "act": 40, "act_max": 50, "card_capacity": 100}
 }
@@ -36,6 +44,7 @@ class FakeGameServer:
         self.response_env = Envelope(*envelope_secrets(client, "response"))
         self.requests: list[tuple[str, str, dict, dict]] = []  # (method, path, query, payload)
         self.raw_bodies: list[bytes] = []
+        self.request_headers: list[dict] = []
         self.version_rejections = 0  # respond N times with new_client_version_exists
         self.state = {"user": dict(USER_PAYLOAD["user"]), "cards": [dict(c) for c in CARDS_PAYLOAD["cards"]]}
 
@@ -57,6 +66,7 @@ class FakeGameServer:
                 split = urlsplit(self.path)
                 query = {k: v[0] for k, v in parse_qs(split.query).items()}
                 clean_query = {k: v for k, v in query.items() if k not in ("data", "sign")}
+                server.request_headers.append(dict(self.headers.items()))
                 if split.path == "/ping":
                     server.requests.append((method, split.path, clean_query, {}))
                     self._respond(200)
@@ -160,6 +170,18 @@ class TransportTests(unittest.TestCase):
     def test_ping_returns_true_on_200(self):
         self.assertTrue(self.gateway.ping())
 
+    def test_ping_sends_x_client_version_header(self):
+        # memory 02/12 update: /ping and every call carry the version code as
+        # the X-ClientVersion header (confirmed verbatim string in the real
+        # client's libcocos2dcpp.so, and against the live ishin-global API —
+        # a bare GET /ping with no header returns 400
+        # client_version/format_invalid; adding this header returns 200 with
+        # a real ping_info body). Not a query param, not in the envelope.
+        self.gateway.ping()
+        self.assertEqual(
+            header(self.server.request_headers[-1], "X-ClientVersion"),
+            "6.6.0-abc")
+
     def test_post_body_is_form_encoded_data_and_sign(self):
         self.gateway.sell_cards([1])
         raw = self.server.raw_bodies[-1].decode()
@@ -168,7 +190,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(set(fields), {"data", "sign"})
         self.assertTrue(self.server.request_env.verify(fields["data"], fields["sign"]))
 
-    def test_payload_carries_identity_and_client_version(self):
+    def test_payload_carries_identity_and_calls_carry_the_version_header(self):
         self.gateway.fetch_account()
         paths = [r[1].split("?")[0] for r in self.server.requests]
         self.assertIn("/resources/login", paths)
@@ -177,7 +199,8 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(payload.get("identifier"), "kyle")
             self.assertEqual(payload.get("access_token"), "at")
             self.assertEqual(payload.get("secret"), "s")
-            self.assertEqual(payload.get("client_version"), "6.6.0-abc")
+        for headers in self.server.request_headers:
+            self.assertEqual(header(headers, "X-ClientVersion"), "6.6.0-abc")
 
     def test_fetch_account_uses_the_verbatim_resources_login_combo(self):
         self.gateway.fetch_account()
@@ -306,7 +329,9 @@ class VersionRetryTests(unittest.TestCase):
         self.gateway.fetch_account()
         self.assertEqual(self.versions.learned, ["9.9.9"])
         self.assertEqual(self.versions.code, "9.9.9")
-        self.assertEqual(self.server.requests[-1][3].get("client_version"), "9.9.9")
+        self.assertEqual(
+            header(self.server.request_headers[-1], "X-ClientVersion"),
+            "9.9.9")
 
 
 if __name__ == "__main__":

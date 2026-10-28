@@ -68,6 +68,22 @@ DEFAULT_HOSTS = {
 }
 SELL_BATCH_SIZE = 99  # verified batches of 99 (memory 02/09)
 
+# Memory 06: "Headers include emulated User-Agent (memory 14) plus standard
+# Accept-Encoding, Keep-Alive." Memory 14 itself was never recovered (see
+# PROGRESS.md discrepancies), so the exact string is unconfirmed — but
+# sending *no* User-Agent at all (urllib defaults to "Python-urllib/x.y")
+# makes every request look like a bare script to the API's edge/CDN, which
+# answers with a bare 404 instead of a game-level error. This is a generic
+# mobile-app-shaped placeholder, not a per-device identity (no AdId/UniqueId/
+# device token here — that stays out of scope); override via the
+# ``user_agent=`` constructor argument if the real string is ever captured.
+DEFAULT_USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 13)"
+DEFAULT_HEADERS = {
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "Keep-Alive",
+}
+
 # Identity fields the gateway always supplies; callers may not override them.
 _IDENTITY_KEYS = frozenset({"identifier", "access_token", "secret", "user_id"})
 
@@ -201,7 +217,8 @@ class HttpGateway(SummonMixin, DailyMixin, BoardsMixin, LinksMixin,
     def __init__(self, save: SaveRecord, versions: VersionSource | None = None,
                  base_url: str | None = None, timeout: float = 30.0, *,
                  sleep=time.sleep, network_retries: int = 2,
-                 network_backoff: float = 0.5) -> None:
+                 network_backoff: float = 0.5,
+                 user_agent: str | None = DEFAULT_USER_AGENT) -> None:
         if base_url is None and save.client not in DEFAULT_HOSTS:
             raise GatewayError(
                 f"unknown client {save.client!r}; "
@@ -213,15 +230,57 @@ class HttpGateway(SummonMixin, DailyMixin, BoardsMixin, LinksMixin,
         self._sleep = sleep
         self._network_retries = max(0, network_retries)
         self._network_backoff = max(0.0, network_backoff)
+        self._headers = dict(DEFAULT_HEADERS)
+        if user_agent is not None:
+            self._headers["User-Agent"] = user_agent
         self._out = Envelope(*envelope_secrets(save.client, "request"))
         self._in = Envelope(*envelope_secrets(save.client, "response"))
 
     # -- transport ----------------------------------------------------------
+    def _request_headers(self) -> dict:
+        """Base headers plus X-ClientVersion (memory 02/12, confirmed live).
+
+        The version code travels as the ``X-ClientVersion`` HTTP header, not
+        inside the encrypted envelope and not as a query param — confirmed
+        both from the verbatim ``X-ClientVersion: `` string recovered from
+        the real client's ``libcocos2dcpp.so``, and against the live
+        ishin-global API: a bare GET /ping returns 400
+        ``client_version/format_invalid``; adding this header returns 200
+        with a genuine ``ping_info`` body. ``/ping`` is unauthenticated and
+        carries no envelope, so this header is the only version signal it
+        can send.
+        """
+        headers = dict(self._headers)
+        if self._versions is not None:
+            code = self._versions.code
+            if code:
+                headers["X-ClientVersion"] = code
+        return headers
+
+    @staticmethod
+    def _make_request(url: str, *, method: str, headers: dict,
+                       data: bytes | None = None):
+        """Build the Request with our header dict.
+
+        Note for anyone diffing against the real client: ``urlopen``'s
+        internal ``AbstractHTTPHandler.do_open`` re-titles every header name
+        with ``str.title()`` before it hits the wire (so ``X-ClientVersion``
+        becomes ``X-Clientversion``), regardless of what is set here or on
+        the ``Request`` object — there is no way to get byte-exact casing
+        through the stdlib ``urlopen`` path short of dropping to raw
+        ``http.client``. Harmless: HTTP header names are case-insensitive
+        (RFC 7230 §3.2) and the real ishin-global API treats it as such
+        (verified live).
+        """
+        return urllib.request.Request(url, data=data, headers=headers,
+                                      method=method)
+
     def ping(self) -> bool:
-        """GET /ping connectivity probe (memory 02)."""
+        """GET /ping connectivity probe (memory 02/12)."""
         try:
             with urllib.request.urlopen(
-                urllib.request.Request(f"{self._base}/ping", method="GET"),
+                self._make_request(f"{self._base}/ping", method="GET",
+                                   headers=self._request_headers()),
                 timeout=self._timeout,
             ) as response:
                 return response.status == 200
@@ -238,6 +297,7 @@ class HttpGateway(SummonMixin, DailyMixin, BoardsMixin, LinksMixin,
         body.update(self._identity())
         data, sign = self._out.seal(body)
         fields = {"data": data, "sign": sign}
+        headers = self._request_headers()
         if method == "GET":
             if payload:
                 raise GatewayError("GET requests cannot carry a payload")
@@ -245,14 +305,15 @@ class HttpGateway(SummonMixin, DailyMixin, BoardsMixin, LinksMixin,
             # the target; see the module docstring for the exposure caveat.
             query = urllib.parse.urlencode(
                 {**dict(params or {}), **fields}, doseq=True)
-            return urllib.request.Request(f"{self._base}{path}?{query}",
-                                          method="GET")
+            return self._make_request(f"{self._base}{path}?{query}",
+                                      headers=headers, method="GET")
         query = urllib.parse.urlencode(params or {}, doseq=True)
         url = f"{self._base}{path}" + (f"?{query}" if query else "")
-        return urllib.request.Request(
+        return self._make_request(
             url,
             data=urllib.parse.urlencode(fields).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     **headers},
             method="POST",
         )
 
@@ -393,10 +454,6 @@ class HttpGateway(SummonMixin, DailyMixin, BoardsMixin, LinksMixin,
         }
         if self._save.user_id is not None:
             payload["user_id"] = self._save.user_id
-        if self._versions is not None:
-            code = self._versions.code
-            if code:
-                payload["client_version"] = code
         return payload
 
     # -- GameGateway ---------------------------------------------------------

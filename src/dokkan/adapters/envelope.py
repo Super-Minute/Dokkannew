@@ -53,13 +53,43 @@ class Envelope:
     """AES-256-CBC + HMAC-MD5 envelope for one (password, salt) pair."""
 
     def __init__(self, password: bytes, salt: bytes) -> None:
+        self._password = password
+        self._salt = salt
         self.key, self.iv = evp_bytes_to_key(password, salt, KEY_SIZE, BLOCK_SIZE)
 
     def seal(self, payload: dict) -> tuple[str, str]:
-        """Encrypt a JSON payload; return ``(base64 data, hex mac)``."""
+        """Encrypt a JSON payload; return ``(base64 data, hex mac)``.""" 
         ciphertext = cbc_encrypt(self.key, self.iv, json.dumps(payload).encode())
         data = base64.b64encode(ciphertext).decode()
         return data, self.mac(ciphertext)
+
+    def seal_with_mac_key(self, payload: dict, mac_key: bytes) -> tuple[str, str]:
+        """Like :meth:`seal`, but MAC-ed with an explicit key instead of
+        ``self.key`` — see :meth:`candidate_mac_keys`."""
+        ciphertext = cbc_encrypt(self.key, self.iv, json.dumps(payload).encode())
+        data = base64.b64encode(ciphertext).decode()
+        return data, hmac.new(mac_key, ciphertext, hashlib.md5).hexdigest()
+
+    def candidate_mac_keys(self) -> list[tuple[str, bytes]]:
+        """Named candidate HMAC keys for the still-unconfirmed MAC key
+        (memory 04 "key1" local; confirmed 2026-10-28 via a live
+        ``decrypt_failed`` from the real server plus the recovered
+        ``cryption.py`` local-name pool: ``encrypt_sign``'s locals are
+        ``data, key1, password, salt, key, cipher`` — ``key1`` is assigned
+        *before* ``password``/``salt``/``key`` exist, and ``decrypt_sign``
+        has no ``key1`` local at all. That means the real client signs with
+        a key that is almost certainly NOT the AES key this class defaults
+        to in :meth:`mac`. These are tried in this order by the first
+        caller that hits a live ``decrypt_failed`` (currently
+        ``GoogleFlow``); whichever one the server accepts is the answer."""
+        return [
+            ("aes_key", self.key),  # current default (mac()/seal()) — the first, most likely wrong, guess
+            ("password_raw", self._password),
+            ("salt_raw", self._salt),
+            ("md5_password_salt", hashlib.md5(self._password + self._salt).digest()),
+            ("key_plus_iv", self.key + self.iv),
+            ("iv", self.iv),
+        ]
 
     def open(self, data: str) -> dict:
         """Decrypt base64 ciphertext back into a JSON payload."""

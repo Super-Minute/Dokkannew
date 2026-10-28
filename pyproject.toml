@@ -8,6 +8,7 @@ dependencies = []
 
 [project.scripts]
 dokkan = "dokkan.cli.main:main"
+dokkan-gui = "dokkan.gui.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -101,6 +101,10 @@ class FakeGameServer:
             return {"briefing": {}}
         if path.startswith("/z_battles/"):
             return {"success": True}
+        if path.endswith("/resume") and path.startswith("/kobetu_battles/"):
+            return {"room_state": "opaque-protobuf-bytes-placeholder"}
+        if path.endswith("/transit_round") and path.startswith("/kobetu_battles/"):
+            return {"success": True}
         if path.startswith("/kobetu_battles/"):
             return {"success": True}
         if path == "/rankings":
@@ -266,6 +270,19 @@ class SocialBattleMixinTests(unittest.TestCase):
         self.gateway.kobetu_command(9, "take_energy_ball", payload={"ball": 3})
         _, _, _, payload = self._last()
         self.assertEqual(payload["ball"], 3)
+
+    def test_kobetu_resume_is_a_bare_get(self):
+        result = self.gateway.kobetu_resume(9)
+        method, path, _, _ = self._last()
+        self.assertEqual((method, path), ("GET", "/kobetu_battles/9/resume"))
+        # The nested battle-state field is opaque protobuf (memory 12
+        # caveat) — only assert the call shape, not the field's meaning.
+        self.assertIn("room_state", result)
+
+    def test_kobetu_transit_round_is_a_bare_post(self):
+        self.gateway.kobetu_transit_round(9)
+        method, path, _, _ = self._last()
+        self.assertEqual((method, path), ("POST", "/kobetu_battles/9/transit_round"))
 
     # -- rankings ----------------------------------------------------------------
     def test_rankings(self):

@@ -4,16 +4,23 @@ A single-account helper organised as concentric rings. Dependencies point inward
 `tests/test_architecture.py` fails the build if an inner ring imports an outer one.
 
 ```
-cli  ->  adapters  ->  application  ->  domain
-(3)       (2)            (1)             (0)
+            -> cli -\
+domain -> application -> adapters -> service        -> (presentation)
+                                               -> gui -/
 ```
+
+Both `cli` and `gui` sit at the same outermost ring: each is its own
+composition root (wires concrete adapters to `service`/`application`),
+neither imports the other, and both expose the exact same capabilities.
 
 | Ring | Package | Contents |
 |------|---------|----------|
 | 0 | `dokkan.domain` | Models (`Card`, `Stage`, `Stamina`, `Team`, `Account`), invariants, pure policies (what to sell, who to field) |
 | 1 | `dokkan.application` | Use cases (`FarmStage`, `SellCards`, `FindStage`, `ListEvents`), the `GameGateway` port, settings |
 | 2 | `dokkan.adapters` | JSON settings loader, save loader, `SimulatedGateway` (offline), envelope crypto, version store, `HttpGateway` (game API) |
+| service | `dokkan.service` | `DokkanService` — one facade object exposing every operation |
 | 3 | `dokkan.cli` | Command parser/script runner and the composition root (`main.py`) |
+| 3 | `dokkan.gui` | Tk desktop front end: `controller.py` (display-agnostic logic, its own composition root) + `app.py` (the widgets) |
 
 ## Run
 
@@ -26,6 +33,32 @@ PYTHONPATH=src:tests python -m unittest discover -s tests
 ```
 
 Commands: `info`, `events`, `sell auto`, `farm <stage_id> <runs>`, `ping`.
+
+## GUI
+
+A desktop front end (stdlib `tkinter`, no extra dependency) offering the
+same operations as the interactive CLI menu — nothing more:
+
+```
+PYTHONPATH=src python -m dokkan.gui   # or: make gui, or the `dokkan-gui` script after `pip install -e .`
+```
+
+The window has a connection bar (gateway: simulated/http, save file,
+client, API URL override — same defaults as the CLI, simulated by
+default), buttons for Account info / Events / Farm a stage / Daily tasks
+/ List summon banners / Summon / Greatest Warrior board / Link skill
+status / Sell cards automatically / Ping the server / Box summary / Box
+as a webpage / Plan a sale, "Log in" and "Log in with Google" (the same
+browser-based OAuth flow as the CLI, with its disclosure dialog before
+anything opens), and an output pane mirroring what the CLI prints.
+
+It drives the exact same `DokkanService` facade and application use
+cases as the CLI — see `dokkan/gui/controller.py` (display-agnostic, unit
+tested without a display) and `dokkan/gui/app.py` (the Tk widgets, a thin
+shell with no game logic of its own). `gui` is architecturally a sibling
+of `cli`: both are composition roots at the same outer ring, enforced by
+`tests/test_architecture.py`; the GUI adds no capability, endpoint, or
+scope beyond what the CLI already exposes.
 
 ## Game API gateway
 

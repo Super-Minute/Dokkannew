@@ -186,13 +186,15 @@ class SignInTests(AuthFlowTestCase):
         self.assertEqual(result.access_token, "new-token")
         self.assertEqual(result.user_id, 42)
         self.assertEqual(result.raw["access_token"], "new-token")
-        nonce_payload = self._requests("/auth/nonce")[0][3]
+        nonce_headers = self._requests("/auth/nonce")[0][4]
         _, _, _, payload, headers = self._requests("/auth/sign_in")[0]
-        self.assertEqual(nonce_payload.get("client_version"), "6.6.0-abc")
+        # memory 02/12 update: client_version travels as the X-ClientVersion
+        # header (confirmed live against ishin-global), not in the envelope.
+        self.assertEqual(nonce_headers["x-clientversion"], "6.6.0-abc")
         self.assertEqual(payload["identifier"], "kyle")
         self.assertEqual(payload["secret"], "s3cret")
         self.assertEqual(payload["auth_transaction_id"], "txn-1")
-        self.assertEqual(payload.get("client_version"), "6.6.0-abc")
+        self.assertEqual(headers["x-clientversion"], "6.6.0-abc")
         self.assertEqual(headers["cache-control"], "no-cache")
         self.assertEqual(headers["x-usercountry"], "US")
         self.assertEqual(headers["x-usercurrency"], "USD")
@@ -302,6 +304,11 @@ class PacingTests(AuthFlowTestCase):
 class PingTests(AuthFlowTestCase):
     def test_ping_returns_true_on_200(self):
         self.assertTrue(self.make_flow().ping())
+
+    def test_ping_sends_x_client_version_header(self):
+        self.make_flow().ping()
+        _, _, _, _, headers = self._requests("/ping")[0]
+        self.assertEqual(headers["x-clientversion"], "6.6.0-abc")
 
     def test_default_hosts_match_the_recovered_constants(self):
         self.assertEqual(DEFAULT_HOSTS, {

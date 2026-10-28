@@ -10,7 +10,8 @@ response secrets, and a ``new_client_version_exists`` reply forces one
 version refresh and retry.
 
 Wire details the recovered spec leaves unconfirmed are collected here:
-the nonce body (we send only ``client_version``), a ``Basic`` auth-scheme
+the nonce body (empty — the client version travels as the X-ClientVersion
+header, memory 02/12), a ``Basic`` auth-scheme
 hint sitting next to the recovered sign-in constants (not implemented),
 the exact response field carrying the "Server verification expired" signal
 (we scan the common error keys), and the placement of the platform block
@@ -28,7 +29,7 @@ from dataclasses import dataclass, replace
 from typing import Mapping
 
 from dokkan.adapters.envelope import Envelope, envelope_secrets
-from dokkan.adapters.http_gateway import DEFAULT_HOSTS, VersionSource
+from dokkan.adapters.http_gateway import DEFAULT_HEADERS, DEFAULT_HOSTS, VersionSource
 from dokkan.adapters.save_store import SaveRecord
 from dokkan.application.errors import ApplicationError
 from dokkan.application.settings import DelayRange
@@ -119,11 +120,22 @@ class AuthFlow:
         self._in = Envelope(*envelope_secrets(client, "response"))
 
     # -- transport ----------------------------------------------------------
+    def _request_headers(self) -> dict:
+        """DEFAULT_HEADERS plus X-ClientVersion (memory 02/12, confirmed
+        live against ishin-global: the recovered ``X-ClientVersion: ``
+        string from the real client's libcocos2dcpp.so, not a query param
+        or envelope field — mirrors HttpGateway._request_headers)."""
+        headers = dict(DEFAULT_HEADERS)
+        if self._versions is not None and self._versions.code:
+            headers["X-ClientVersion"] = self._versions.code
+        return headers
+
     def ping(self) -> bool:
-        """GET /ping connectivity probe (memory 02)."""
+        """GET /ping connectivity probe (memory 02/12)."""
         try:
             with urllib.request.urlopen(
-                urllib.request.Request(f"{self._base}/ping", method="GET"),
+                urllib.request.Request(f"{self._base}/ping", method="GET",
+                                       headers=self._request_headers()),
                 timeout=self._timeout,
             ) as response:
                 return response.status == 200
@@ -138,6 +150,7 @@ class AuthFlow:
             f"{self._base}{path}",
             data=urllib.parse.urlencode(fields).encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded",
+                     **self._request_headers(),
                      **dict(headers or {})},
             method="POST")
         return self._read(request)
@@ -165,21 +178,18 @@ class AuthFlow:
                     f"cannot decrypt response from {request.full_url}: {exc}") from exc
         return parsed
 
-    def _version_payload(self) -> dict:
-        payload = {}
-        if self._versions is not None:
-            payload["client_version"] = self._versions.code
-        return payload
-
     def _pace(self) -> None:
         if self._delay is not None:
             self._sleep(self._rng(self._delay.min, self._delay.max))
 
     # -- handshake ----------------------------------------------------------
     def nonce(self) -> str:
-        """POST /auth/nonce and return the ``auth_transaction_id``."""
+        """POST /auth/nonce and return the ``auth_transaction_id``.
+
+        The body carries no payload fields (memory 02/12 update: the client
+        version travels as the X-ClientVersion header, not here)."""
         for attempt in (0, 1):
-            response = self._post("/auth/nonce", self._version_payload())
+            response = self._post("/auth/nonce", {})
             if not response.get("new_client_version_exists"):
                 transaction = response.get("auth_transaction_id")
                 if not isinstance(transaction, str) or not transaction:
@@ -204,7 +214,6 @@ class AuthFlow:
                 "identifier": identifier,
                 "secret": secret,
                 "auth_transaction_id": transaction,
-                **self._version_payload(),
             }
             if device_token:
                 payload["device_token"] = device_token

@@ -23,8 +23,23 @@ Recovered verbatim shapes (memory 02/12):
   ``POST /z_battles/{id}/{op}``.
 - kobetu (turn-based) battles: ``POST /kobetu_battles/{id}/commands/{cmd}``
   for the verbatim ``KOBETU_COMMANDS`` strings recovered from the binary's
-  strings blob (``resume``/``transit_round`` are separate, non-``commands/``
-  endpoints and are out of scope for this slice).
+  strings blob. ``GET /kobetu_battles/{id}/resume`` (re-attach to an
+  in-progress room; read-only, no stamina charge) and
+  ``POST /kobetu_battles/{id}/transit_round`` (advance a mid-turn sub-round
+  so the energy-ball board repopulates) round out the family (memory 12,
+  2026-10-26 strings re-pass around ``all_strings.txt:285296-285746``).
+  IMPORTANT caveat recovered in the same pass: the battle *room/snapshot*
+  state nested inside these two responses (and inside ``commands/next_turn``)
+  is wrapped protobuf (message names ``pb.api.kobetu_battle.ResumeResponse``
+  / a ``CommandResponse`` in field 1), optionally zstd-compressed — a
+  materially different wire shape from the plain-JSON envelope every other
+  endpoint in this codebase uses. ``_call`` still unwraps the outer
+  envelope/JSON fine (these are normal POST/GET game-API calls), but the
+  interesting battle-state fields inside the response dict are opaque
+  bytes until that protobuf layer is decoded — decoding it needs the
+  descriptor set / zstd dictionary, which is NOT recovered yet. Treat these
+  two methods as raw-call wrappers only; do not assume the returned dict's
+  nested fields are directly usable JSON.
 """
 from __future__ import annotations
 
@@ -101,6 +116,21 @@ class SocialBattleMixin:
     def kobetu_command(self, battle_id: int, command: str, payload: dict | None = None) -> dict:
         return self._call(
             "POST", f"/kobetu_battles/{battle_id}/commands/{command}", payload=payload)
+
+    def kobetu_resume(self, battle_id: int) -> dict:
+        """GET /kobetu_battles/{battle_id}/resume — re-attach to an
+        in-progress room and fetch its authoritative snapshot; read-only,
+        charges no stamina (memory 12). The response's nested battle-state
+        field is wrapped protobuf (``pb.api.kobetu_battle.ResumeResponse``),
+        not plain JSON — see the module docstring caveat."""
+        return self._call("GET", f"/kobetu_battles/{battle_id}/resume")
+
+    def kobetu_transit_round(self, battle_id: int) -> dict:
+        """POST /kobetu_battles/{battle_id}/transit_round — advance to the
+        next sub-round within a turn so the energy-ball board repopulates
+        (memory 12). The response's nested battle-state field is wrapped
+        protobuf, same caveat as ``kobetu_resume``."""
+        return self._call("POST", f"/kobetu_battles/{battle_id}/transit_round")
 
     # -- rankings ----------------------------------------------------------------
     def rankings(self) -> dict:

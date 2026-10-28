@@ -77,7 +77,8 @@ class DailyMixin:
                 continue
             key, gift_id = found
             try:
-                self._call("POST", "/gifts/accept", payload={key: gift_id})
+                self._call("POST", "/gifts/accept", payload={key: gift_id},
+                           idempotent=False)
             except ApplicationError:
                 continue
             accepted += 1
@@ -97,7 +98,8 @@ class DailyMixin:
                 continue
             key, mission_id = found
             try:
-                self._call("POST", "/missions/accept", payload={key: mission_id})
+                self._call("POST", "/missions/accept", payload={key: mission_id},
+                           idempotent=False)
             except ApplicationError:
                 continue
             accepted += 1

@@ -13,7 +13,7 @@ from dokkan.application.use_cases.find_stage import FindStage, StageNotFound
 from dokkan.application.use_cases.summon_cards import InvalidTargets
 from dokkan.cli.commands import CommandRunner, UsageError
 from dokkan.cli.main import main
-from test_http_gateway import FakeGameServer
+from test_http_gateway import FakeGameServer, header
 
 
 def run(*lines, gateway=None, settings=None) -> str:
@@ -265,7 +265,7 @@ class GatewaySelectionTests(unittest.TestCase):
                 self.assertEqual((code, err), (0, ""))
                 self.assertIn("Testy: stamina 40/50, 2 cards", out)
             # the retried request carried the freshly fetched client version
-            versions = [p.get("client_version") for _, _, _, p in server.requests]
+            versions = [header(h, "X-ClientVersion") for h in server.request_headers]
             self.assertIn(new_code, versions)
         finally:
             server.close()
@@ -287,7 +287,7 @@ class GatewaySelectionTests(unittest.TestCase):
                 "--version-file", "{d}/version.json", "info")
             self.assertEqual((code, err), (0, ""))
             self.assertIn("Testy: stamina 40/50, 2 cards", out)
-            versions = [p.get("client_version") for _, _, _, p in server.requests]
+            versions = [header(h, "X-ClientVersion") for h in server.request_headers]
             self.assertEqual(versions[-1], "9.9.9")
         finally:
             server.close()
@@ -408,6 +408,115 @@ class GatewaySelectionTests(unittest.TestCase):
         self.assertEqual(refreshed["access_token"], "fresh-at")
         self.assertEqual(refreshed["user_id"], 42)
         self.assertEqual(refreshed["secret"], "s")
+
+    def test_login_google_with_token_is_verbose_and_writes_save(self):
+        server = FakeGameServer()
+
+        def route(path, payload):
+            if path == "/user/succeed/google":
+                assert payload.get("google_token") == "tok-xyz"
+                return {"identifier": "gg-1", "access_token": "at",
+                        "secret": "sec", "user_id": 7}
+            raise AssertionError(path)
+
+        server.route = route
+        out, err = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            save = Path(d) / "save.json"
+            (Path(d) / "zero.json").write_text(json.dumps(
+                {"client_delays": {"global": {"min": 0, "max": 0},
+                                   "japan": {"min": 0, "max": 0}}}))
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = main(["--config", f"{d}/zero.json", "--gateway", "http",
+                                 "--save", str(save), "--client", "glb",
+                                 "--api-url", server.url(), "--google-token", "tok-xyz",
+                                 "login", "google"])
+            finally:
+                server.close()
+            written = json.loads(save.read_text())
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        text = out.getvalue()
+        # the whole step-by-step narration, not just the final line
+        self.assertIn("Google sign-in: client=global", text)
+        self.assertIn("Using the Google token passed on the command line", text)
+        self.assertIn("Submitting the Google token to the Dokkan API", text)
+        self.assertIn("Dokkan API accepted the Google token: identifier=gg-1, "
+                      "user_id=7", text)
+        self.assertIn("signed in with Google: gg-1", text)
+        self.assertEqual(written["identifier"], "gg-1")
+
+
+class RequireGoogleClientSecretTests(unittest.TestCase):
+    """Google's token endpoint rejects the code exchange with
+    "client_secret is missing." for "Desktop app" OAuth clients even
+    under PKCE — confirmed live, 2026-10-26. These test the CLI's own
+    get-it-from-somewhere helper directly, same pattern as test_pacing's
+    _build_gateway tests.
+    """
+
+    def _args(self, d, **overrides):
+        from types import SimpleNamespace
+        values = dict(config=Path(d) / "c.json", google_client_secret=None)
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_returns_cli_flag_without_prompting(self):
+        from dokkan.cli.main import _require_google_client_secret
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d, google_client_secret="shh-flag")
+            self.assertEqual(_require_google_client_secret(args), "shh-flag")
+
+    def test_returns_env_var_when_no_flag(self):
+        import os
+        from dokkan.cli.main import _require_google_client_secret
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["DOKKAN_GOOGLE_CLIENT_SECRET"] = "shh-env"
+            try:
+                self.assertEqual(
+                    _require_google_client_secret(self._args(d)), "shh-env")
+            finally:
+                del os.environ["DOKKAN_GOOGLE_CLIENT_SECRET"]
+
+    def test_returns_config_value_when_no_flag_or_env(self):
+        from dokkan.cli.main import _require_google_client_secret
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d)
+            args.config.write_text(json.dumps({"google_client_secret": "shh-cfg"}))
+            self.assertEqual(_require_google_client_secret(args), "shh-cfg")
+
+    def test_raises_helpful_usage_error_without_a_terminal(self):
+        from unittest import mock
+        from dokkan.cli.main import _require_google_client_secret
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaises(UsageError) as exc:
+                    _require_google_client_secret(self._args(d))
+            message = str(exc.exception)
+            self.assertIn("--google-client-secret", message)
+            self.assertIn("Desktop app", message)
+
+    def test_prompts_and_remembers_when_missing_with_a_terminal(self):
+        from unittest import mock
+        from dokkan.cli.main import _require_google_client_secret
+        with tempfile.TemporaryDirectory() as d:
+            args = self._args(d)
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", return_value="typed-secret"):
+                secret = _require_google_client_secret(args)
+            self.assertEqual(secret, "typed-secret")
+            self.assertEqual(
+                json.loads(args.config.read_text())["google_client_secret"],
+                "typed-secret")
+
+    def test_blank_prompt_cancels(self):
+        from unittest import mock
+        from dokkan.cli.main import _require_google_client_secret
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", return_value=""):
+                with self.assertRaises(UsageError):
+                    _require_google_client_secret(self._args(d))
 
 
 if __name__ == "__main__":

@@ -20,7 +20,11 @@ class StageResult:
 
 
 class GameGateway(Protocol):
-    """Everything the use cases may ask of the game. Adapters decide how."""
+    # ... existing methods ...
+
+    def ping(self) -> bool:
+        """GET /ping connectivity probe."""
+        ...
 
     def fetch_account(self) -> Account: ...
 

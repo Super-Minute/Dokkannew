@@ -10,6 +10,7 @@ ALLOWED = {
     "service": {"domain", "application"},
     "adapters": {"domain", "application"},
     "cli": {"domain", "application", "adapters", "service"},
+    "gui": {"domain", "application", "adapters", "service"},
 }
 
 
